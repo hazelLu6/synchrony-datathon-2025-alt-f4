@@ -1,5 +1,6 @@
 import pandas as pd
 import numpy as np
+import os
 
 def clean_and_aggregate_data():
     # Load CSV files from the data/ directory
@@ -51,13 +52,36 @@ def clean_and_aggregate_data():
     df_trans_all = pd.concat([df_trans, df_wrld_trans], ignore_index=True)
     df_trans_all["transaction_date"] = pd.to_datetime(df_trans_all["transaction_date"], errors="coerce")
     
+    # Define time period functions - add quarterly breakdowns
     def is_2024(date_val):
         return (date_val >= pd.Timestamp("2024-01-01")) & (date_val <= pd.Timestamp("2024-12-31"))
+    
     def is_2025_ytd(date_val):
         return (date_val >= pd.Timestamp("2025-01-01")) & (date_val <= pd.Timestamp("2025-03-24"))
     
+    # Add quarterly period functions
+    def is_2024_q1(date_val):
+        return (date_val >= pd.Timestamp("2024-01-01")) & (date_val <= pd.Timestamp("2024-03-31"))
+    
+    def is_2024_q2(date_val):
+        return (date_val >= pd.Timestamp("2024-04-01")) & (date_val <= pd.Timestamp("2024-06-30"))
+    
+    def is_2024_q3(date_val):
+        return (date_val >= pd.Timestamp("2024-07-01")) & (date_val <= pd.Timestamp("2024-09-30"))
+    
+    def is_2024_q4(date_val):
+        return (date_val >= pd.Timestamp("2024-10-01")) & (date_val <= pd.Timestamp("2024-12-31"))
+    
+    # Apply time period flags
     df_trans_all["in_2024"] = is_2024(df_trans_all["transaction_date"])
     df_trans_all["in_2025_ytd"] = is_2025_ytd(df_trans_all["transaction_date"])
+    
+    # Add quarterly flags
+    df_trans_all["in_2024_q1"] = is_2024_q1(df_trans_all["transaction_date"])
+    df_trans_all["in_2024_q2"] = is_2024_q2(df_trans_all["transaction_date"])
+    df_trans_all["in_2024_q3"] = is_2024_q3(df_trans_all["transaction_date"])
+    df_trans_all["in_2024_q4"] = is_2024_q4(df_trans_all["transaction_date"])
+    
     df_trans_all["is_purchase"] = df_trans_all["transaction_type"].eq("SALE")
     df_trans_all["is_return"] = df_trans_all["transaction_type"].eq("RETURN")
     df_trans_all["signed_amount"] = np.where(df_trans_all["is_return"],
@@ -66,10 +90,21 @@ def clean_and_aggregate_data():
     
     # Pre-aggregate transaction data by account to avoid duplicating rows
     trans_agg = df_trans_all.groupby("current_account_nbr").apply(lambda g: pd.Series({
+        # Original aggregations
         "total_spend_2024": g.loc[g["in_2024"], "signed_amount"].sum(),
         "total_transactions_2024": g.loc[g["in_2024"] & g["is_purchase"]].shape[0],
         "total_spend_2025YTD": g.loc[g["in_2025_ytd"], "signed_amount"].sum(),
         "total_transactions_2025YTD": g.loc[g["in_2025_ytd"] & g["is_purchase"]].shape[0],
+        
+        # Add quarterly aggregations
+        "spend_2024_q1": g.loc[g["in_2024_q1"], "signed_amount"].sum(),
+        "transactions_2024_q1": g.loc[g["in_2024_q1"] & g["is_purchase"]].shape[0],
+        "spend_2024_q2": g.loc[g["in_2024_q2"], "signed_amount"].sum(),
+        "transactions_2024_q2": g.loc[g["in_2024_q2"] & g["is_purchase"]].shape[0],
+        "spend_2024_q3": g.loc[g["in_2024_q3"], "signed_amount"].sum(),
+        "transactions_2024_q3": g.loc[g["in_2024_q3"] & g["is_purchase"]].shape[0],
+        "spend_2024_q4": g.loc[g["in_2024_q4"], "signed_amount"].sum(),
+        "transactions_2024_q4": g.loc[g["in_2024_q4"] & g["is_purchase"]].shape[0],
     })).reset_index()
     
     # Use left merge to avoid duplicating rows
@@ -80,6 +115,13 @@ def clean_and_aggregate_data():
         df_fraud_case["has_fraud"] = 1
         df_fraud_case_agg = df_fraud_case.groupby("current_account_nbr", as_index=False)["has_fraud"].max()
         df_merged = pd.merge(df_merged, df_fraud_case_agg, how="left", on="current_account_nbr")
+        # Explicitly fill NaN values with 0 for accounts with no fraud
+        df_merged["has_fraud"] = df_merged["has_fraud"].fillna(0).astype(int)
+        print(f"Fraud accounts: {df_merged['has_fraud'].sum()} out of {len(df_merged)} total accounts")
+    else:
+        # If no fraud cases, ensure the column exists with all zeros
+        df_merged["has_fraud"] = 0
+        print("No fraud accounts found in the data")
     
     # Process fraud transaction data
     if df_fraud_tran.shape[0] > 0:
@@ -242,6 +284,17 @@ def clean_and_aggregate_data():
     transaction_cols = ["total_spend_2024", "total_transactions_2024", 
                        "total_spend_2025YTD", "total_transactions_2025YTD"]
     for col in transaction_cols:
+        if col in df_merged.columns:
+            base_agg_dict[col] = "sum"
+    
+    # Add quarterly spend columns
+    quarterly_cols = [
+        "spend_2024_q1", "transactions_2024_q1", 
+        "spend_2024_q2", "transactions_2024_q2",
+        "spend_2024_q3", "transactions_2024_q3",
+        "spend_2024_q4", "transactions_2024_q4"
+    ]
+    for col in quarterly_cols:
         if col in df_merged.columns:
             base_agg_dict[col] = "sum"
 

@@ -35,9 +35,14 @@ def clean_and_aggregate_data():
                          how="inner", on="current_account_nbr")
     print("After merging account_dim and syf_id:", df_merged.shape)
     
-    # Rename is_employee to is_high_income if it exists
-    if "is_employee" in df_merged.columns:
-        df_merged.rename(columns={"is_employee": "is_high_income"}, inplace=True)
+    # Drop columns with all null values
+    df_merged = df_merged.drop(columns=["date_in_collection", "special_finance_charge_ind"])
+
+    # Rename employee_code to is_high_income if it exists & clean as boolean
+    if "employee_code" in df_merged.columns:
+        df_merged.rename(columns={"employee_code": "is_high_income"}, inplace=True)
+        df_merged["is_high_income"] = df_merged["is_high_income"].replace({np.nan: 0, "Y": 0, 'H': 1})
+    print("Number of high income entries:", len(df_merged[df_merged["is_high_income"] == 1]))
     
     # Merge statement fact (if available) on current_account_nbr
     if df_statement.shape[0] > 0:
@@ -462,7 +467,7 @@ if __name__ == "__main__":
     df_final = clean_and_aggregate_data()
     print("Final user-level dataset shape:", df_final.shape)
     print(df_final.head(10))
-    output_path = "exploratory_data_analysis/master_user_dataset.csv"
+    output_path = "master_user_dataset.csv"
     df_final.to_csv(output_path, index=False)
     print(f"Master user dataset written to: {output_path}")
     

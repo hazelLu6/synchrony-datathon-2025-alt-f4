@@ -8,7 +8,41 @@ def clean_and_aggregate_data():
     df_syf_id = pd.read_csv("data/syf_id_20250325.csv")
     df_statement = pd.read_csv("data/statement_fact_20250325.csv")
     df_trans = pd.read_csv("data/transaction_fact_20250325.csv")
-    df_wrld_trans = pd.read_csv("data/wrld_stor_tran_fact_20250325.csv")
+    
+    # Try to load the cleaned version of wrld_stor_tran_fact with proper currency conversion first
+    try:
+        df_wrld_trans = pd.read_csv("cleaned_data/cleaned_wrld_stor_tran_fact.csv")
+        print("Loaded CLEANED world store transaction data with proper currency conversion")
+    except FileNotFoundError:
+        try:
+            # Try another possible location
+            df_wrld_trans = pd.read_csv("../cleaned_data/cleaned_wrld_stor_tran_fact.csv")
+            print("Loaded CLEANED world store transaction data with proper currency conversion")
+        except FileNotFoundError:
+            # Fall back to the original file
+            df_wrld_trans = pd.read_csv("data/wrld_stor_tran_fact_20250325.csv")
+            print("WARNING: Using original world store data WITHOUT proper currency conversion")
+    
+    # Load the us_equiv_amt data from the data_cleaning directory
+    try:
+        df_us_equiv_amt = pd.read_csv("data_cleaning/us_equiv_amt.csv")
+        print("Loaded us_equiv_amt data from data_cleaning directory:", df_us_equiv_amt.shape)
+        
+        # Merge with world store transactions if needed
+        if "us_equiv_amt" not in df_wrld_trans.columns:
+            # Identify the key columns to join on
+            join_cols = ["current_account_nbr", "transaction_date", "transaction_amt"]
+            # Make sure transaction_date is properly formatted for join
+            df_wrld_trans["transaction_date"] = pd.to_datetime(df_wrld_trans["transaction_date"], errors="coerce")
+            df_us_equiv_amt["transaction_date"] = pd.to_datetime(df_us_equiv_amt["transaction_date"], errors="coerce")
+            
+            # Merge with world store transactions
+            df_wrld_trans = pd.merge(df_wrld_trans, df_us_equiv_amt[join_cols + ["us_equiv_amt"]], 
+                                     on=join_cols, how="left")
+            print("Merged us_equiv_amt data with world store transactions")
+    except FileNotFoundError:
+        print("WARNING: us_equiv_amt data file not found in data_cleaning directory")
+    
     df_fraud_case = pd.read_csv("data/fraud_claim_case_20250325.csv")
     df_fraud_tran = pd.read_csv("data/fraud_claim_tran_20250325.csv")  # available if needed
     df_rams = pd.read_csv("data/rams_batch_cur_20250325.csv")
@@ -89,9 +123,52 @@ def clean_and_aggregate_data():
     
     df_trans_all["is_purchase"] = df_trans_all["transaction_type"].eq("SALE")
     df_trans_all["is_return"] = df_trans_all["transaction_type"].eq("RETURN")
-    df_trans_all["signed_amount"] = np.where(df_trans_all["is_return"],
-                                             -df_trans_all["transaction_amt"],
-                                             df_trans_all["transaction_amt"])
+    
+    # Check if us_equiv_amt exists, and use it for currency conversion if available
+    use_currency_conversion = "us_equiv_amt" in df_trans_all.columns
+    
+    if use_currency_conversion:
+        print("Using currency-converted US equivalent amounts for spend calculations")
+        # Fill missing us_equiv_amt values with transaction_amt as fallback
+        mask = df_trans_all["us_equiv_amt"].isna() | (df_trans_all["us_equiv_amt"] == 0)
+        df_trans_all.loc[mask, "us_equiv_amt"] = df_trans_all.loc[mask, "transaction_amt"]
+        
+        # Create signed_amount using us_equiv_amt
+        df_trans_all["signed_amount"] = np.where(df_trans_all["is_return"],
+                                               -df_trans_all["us_equiv_amt"],
+                                               df_trans_all["us_equiv_amt"])
+    else:
+        # If us_equiv_amt doesn't exist in the dataframe, try to load it from the CSV file directly
+        try:
+            print("Attempting to add us_equiv_amt directly from data_cleaning/us_equiv_amt.csv")
+            df_us_equiv = pd.read_csv("data_cleaning/us_equiv_amt.csv")
+            
+            # Prepare for merge - convert transaction date to datetime
+            df_us_equiv["transaction_date"] = pd.to_datetime(df_us_equiv["transaction_date"], errors="coerce")
+            
+            # Create a unique transaction identifier for joining
+            join_cols = ["current_account_nbr", "transaction_date", "transaction_amt"]
+            
+            # Merge with transaction data
+            df_trans_all = pd.merge(df_trans_all, df_us_equiv[join_cols + ["us_equiv_amt"]], 
+                                   on=join_cols, how="left")
+            
+            # Fill missing values after merge
+            mask = df_trans_all["us_equiv_amt"].isna() | (df_trans_all["us_equiv_amt"] == 0)
+            df_trans_all.loc[mask, "us_equiv_amt"] = df_trans_all.loc[mask, "transaction_amt"]
+            
+            print(f"Successfully added us_equiv_amt to {(~mask).sum()} transactions")
+            
+            # Create signed_amount using us_equiv_amt
+            df_trans_all["signed_amount"] = np.where(df_trans_all["is_return"],
+                                                  -df_trans_all["us_equiv_amt"],
+                                                  df_trans_all["us_equiv_amt"])
+        except Exception as e:
+            print(f"WARNING: Could not load us_equiv_amt data: {e}")
+            print("Using raw transaction amounts without currency conversion")
+            df_trans_all["signed_amount"] = np.where(df_trans_all["is_return"],
+                                                  -df_trans_all["transaction_amt"],
+                                                  df_trans_all["transaction_amt"])
     
     # Pre-aggregate transaction data by account to avoid duplicating rows
     trans_agg = df_trans_all.groupby("current_account_nbr").apply(lambda g: pd.Series({

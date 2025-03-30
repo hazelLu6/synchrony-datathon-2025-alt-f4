@@ -35,7 +35,6 @@ Below is a sample structure of the repository and relevant files:
 ├── xgboost_models.py # Contains XGBoost model definitions
 ├── run_xgboost_pipeline.py # Main script to run the entire modeling pipeline
 ├── README.md # Project instructions (this file)
-└── presentation_slides.pdf # (Optional) Presentation slides
 ```
 ---
 
@@ -176,6 +175,8 @@ Below is a sample structure of the repository and relevant files:
 
 • We have prepared a short (< 7-minute) explanation video:  
   - [Unlisted YouTube Link Here] (Replace with final link)  
+  - Google slide used: https://docs.google.com/presentation/d/17cAbNUgTXFelDzF7bCX9abowQR43-TFINMWHQ6a9k3o/edit?usp=sharing 
+  - More detailed logic explained: 
 
 In the video, we briefly walk through the business problem, data sources, featured models, and final insights. 
 
@@ -184,7 +185,7 @@ In the video, we briefly walk through the business problem, data sources, featur
 ## 10. Submission Guidelines & Acknowledgments
 
 • **Submission**: Zip all relevant code (including this README) and upload to your project folder / repository.  
-• **Team**: [Alt F4: Luke, Hazel, Ben ].  
+• **Team**: [Alt F4: Tianyi, Hazel, Ben, Angel ].  
 • **Thanks** to everyone who contributed to data generation and the domain SMEs who provided key insights.
 
 ---

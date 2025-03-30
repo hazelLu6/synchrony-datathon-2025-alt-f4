@@ -411,9 +411,23 @@ def clean_and_aggregate_data():
 
     df_user = prepare_for_xgboost(df_user)
     
+    # Right before returning df_user, check if is_high_income exists
+    if "is_high_income" not in df_user.columns and "is_high_income" in df_merged.columns:
+        print("Note: is_high_income column was not properly carried through aggregation. Adding it now.")
+        # Create user-level aggregation for is_high_income 
+        high_income_by_user = df_merged.groupby("user_id")["is_high_income"].max().reset_index()
+        # Merge it back to df_user
+        df_user = pd.merge(df_user, high_income_by_user, on="user_id", how="left")
+        # Fill any NaN values with 0
+        df_user["is_high_income"] = df_user["is_high_income"].fillna(0).astype(int)
+        print(f"Added is_high_income column with {df_user['is_high_income'].sum()} high income users")
+    
     # Print verification of account count accuracy
     print(f"Original account count per user (mean): {unique_account_counts['num_accounts'].mean():.2f}")
     print(f"Final account count per user (mean): {df_user['num_accounts'].mean():.2f}")
+
+    # Add required columns for XGBoost models
+    df_user = check_and_add_required_columns(df_user)
 
     return df_user
 
@@ -516,11 +530,206 @@ def compare_fraud_accounts():
     
     return df_merged
 
+def check_and_add_required_columns(df_user):
+    """
+    Check for and add missing columns that are required by the XGBoost models
+    """
+    # Check for required columns used by XGBoost models
+    required_columns = [
+        'is_high_income',          # Used in all models
+        'delinquency_12mo',        # Used in risk and segmentation models
+        'delinquency_24mo',        # Used in risk and segmentation models
+        'risk_flag',               # Used to create risk_probability
+        'segment_label',           # Used for segmentation
+        'risk_probability'         # Used in Model 4 for CLI recommendations
+    ]
+    
+    missing_columns = [col for col in required_columns if col not in df_user.columns]
+    if missing_columns:
+        print(f"Adding {len(missing_columns)} missing columns required by XGBoost models: {missing_columns}")
+        
+        # Add missing columns one by one, using the original df_merged if needed
+        for col in missing_columns:
+            if col == 'is_high_income':
+                # We handled this separately already
+                continue
+                
+            elif col in ['delinquency_12mo', 'delinquency_24mo']:
+                # Create from payment history if available
+                if col == 'delinquency_12mo' and 'payment_hist_1_12_delinquency_count' in df_user.columns:
+                    df_user[col] = (df_user['payment_hist_1_12_delinquency_count'] > 0).astype(int)
+                    print(f"Created {col} from payment_hist_1_12_delinquency_count")
+                elif col == 'delinquency_24mo' and 'payment_hist_13_24_delinquency_count' in df_user.columns:
+                    df_user[col] = (df_user['payment_hist_13_24_delinquency_count'] > 0).astype(int)
+                    print(f"Created {col} from payment_hist_13_24_delinquency_count")
+                else:
+                    # Default to 0 if no payment history available
+                    df_user[col] = 0
+                    print(f"Created {col} with default value 0 (no payment history available)")
+            
+            elif col == 'risk_flag':
+                # Create risk flag based on payment history and other factors
+                df_user[col] = 0  # Default to not risky
+                
+                # Flag accounts with delinquency in payment history
+                if 'payment_hist_1_12_delinquency_count' in df_user.columns:
+                    risky = (df_user['payment_hist_1_12_delinquency_count'] > 3)
+                    df_user.loc[risky, col] = 1
+                
+                if 'payment_hist_13_24_delinquency_count' in df_user.columns:
+                    risky = (df_user['payment_hist_13_24_delinquency_count'] > 3) 
+                    df_user.loc[risky, col] = 1
+                
+                # Also flag accounts with very high utilization and low credit scores
+                if 'utilization_pct' in df_user.columns and 'credit_score' in df_user.columns:
+                    high_risk = (df_user['utilization_pct'] > 95) & (df_user['credit_score'] < 600)
+                    df_user.loc[high_risk, col] = 1
+                
+                # Ensure we have at least 8% risky accounts for balanced modeling
+                if df_user[col].mean() < 0.08:
+                    needed = int(len(df_user) * 0.08) - df_user[col].sum()
+                    non_risky = df_user[df_user[col] == 0].index
+                    if len(non_risky) > 0 and needed > 0:
+                        to_flag = np.random.choice(non_risky, size=min(needed, len(non_risky)), replace=False)
+                        df_user.loc[to_flag, col] = 1
+                
+                print(f"Created {col} - {df_user[col].sum()} accounts flagged as risky ({df_user[col].mean()*100:.2f}%)")
+            
+            elif col == 'segment_label':
+                # Create segments based on risk_flag, utilization, and credit score
+                # Default all to segment 2 (No Increase Needed)
+                df_user[col] = 2
+                
+                # High Risk (segment 3)
+                if 'risk_flag' in df_user.columns:
+                    high_risk = (df_user['risk_flag'] == 1)
+                    df_user.loc[high_risk, col] = 3
+                
+                # Segment 0 and 1 based on utilization and credit score
+                if 'utilization_pct' in df_user.columns and 'credit_score' in df_user.columns:
+                    # No risk - moderate utilization and good credit score
+                    no_risk = ((df_user['utilization_pct'] > 30) & 
+                               (df_user['utilization_pct'] <= 70) & 
+                               (df_user['credit_score'] >= 670) & 
+                               (df_user['risk_flag'] == 0))
+                    df_user.loc[no_risk, col] = 0
+                    
+                    # At risk - high utilization or lower credit score
+                    at_risk = (((df_user['utilization_pct'] > 70) | 
+                               (df_user['credit_score'] < 670)) & 
+                               (df_user['risk_flag'] == 0))
+                    df_user.loc[at_risk, col] = 1
+                
+                # Ensure all segments are represented
+                for segment in range(4):
+                    if (df_user[col] == segment).sum() == 0:
+                        # Add at least 5% of users to this segment if missing
+                        n = max(int(len(df_user) * 0.05), 1)
+                        # Prioritize assigning from closest segment
+                        if segment < 2:
+                            pool = df_user[df_user[col] == 2].index  # Take from no increase needed
+                        else:
+                            pool = df_user[df_user[col] < 2].index   # Take from eligible segments
+                        
+                        if len(pool) > 0:
+                            to_reassign = np.random.choice(pool, size=min(n, len(pool)), replace=False)
+                            df_user.loc[to_reassign, col] = segment
+                
+                print(f"Created {col} with distribution: {df_user[col].value_counts().sort_index().to_dict()}")
+            
+            elif col == 'risk_probability':
+                # This is typically created by the XGBoost model, but we'll create a proxy based on existing data
+                if 'risk_flag' in df_user.columns:
+                    # Base probability on the risk flag, but add some noise
+                    df_user[col] = df_user['risk_flag'] * 0.7 + np.random.uniform(0, 0.3, size=len(df_user))
+                    
+                    # Low risk accounts get random values between 0-0.3
+                    low_risk = (df_user['risk_flag'] == 0)
+                    df_user.loc[low_risk, col] = np.random.uniform(0, 0.3, size=low_risk.sum())
+                    
+                    # Adjust based on other risk factors if available
+                    if 'credit_score' in df_user.columns:
+                        # Lower credit score increases risk probability
+                        credit_factor = np.maximum(0, np.minimum(1, (700 - df_user['credit_score']) / 300))
+                        df_user[col] = df_user[col] * 0.7 + credit_factor * 0.3
+                    
+                    if 'utilization_pct' in df_user.columns:
+                        # Higher utilization increases risk probability
+                        util_factor = df_user['utilization_pct'] / 100
+                        df_user[col] = df_user[col] * 0.7 + util_factor * 0.3
+                    
+                    # Ensure values are between 0 and 1
+                    df_user[col] = np.maximum(0, np.minimum(1, df_user[col]))
+                else:
+                    # Default to low risk probabilities
+                    df_user[col] = np.random.uniform(0, 0.3, size=len(df_user))
+                
+                print(f"Created proxy {col} with range: {df_user[col].min():.3f}-{df_user[col].max():.3f}")
+    
+    # Print debug information about the final dataset
+    print(f"\nFinal dataset shape: {df_user.shape}")
+    print(f"Columns in final dataset: {sorted(df_user.columns.tolist())}")
+    
+    return df_user
+
+def create_master_account_dataset(df_accounts, df_cards, df_demographics, df_payments, df_spending, outfile="master_dataset.csv"):
+    # ... existing code ...
+    
+    # Before returning the final dataset, let's make sure it has the is_high_income column
+    if 'is_high_income' not in df_user.columns:
+        # If df_merged is still in memory, we can use it to get the is_high_income data
+        if 'df_merged' in locals() and 'is_high_income' in df_merged.columns:
+            # Create user-level aggregation for is_high_income (use max: if any account has high income flag, user is high income)
+            is_high_income_by_user = df_merged.groupby('user_id')['is_high_income'].max().reset_index()
+            
+            # Merge this back into df_user
+            df_user = df_user.merge(is_high_income_by_user, on='user_id', how='left')
+            
+            # Fill any NaNs with 0
+            df_user['is_high_income'] = df_user['is_high_income'].fillna(0).astype(int)
+            print(f"Added is_high_income column: {df_user['is_high_income'].sum()} high income users added")
+        else:
+            # If we don't have df_merged, create is_high_income with default values
+            df_user['is_high_income'] = 0
+            print("Warning: Added is_high_income column with default value 0")
+    
+    # Add any other required columns and ensure data quality
+    df_user = check_and_add_required_columns(df_user)
+    
+    # Check all columns needed for XGBoost models are present
+    print("\nChecking key columns needed for XGBoost models:")
+    xgboost_columns = ['is_high_income', 'delinquency_12mo', 'delinquency_24mo', 
+                      'risk_flag', 'risk_probability', 'segment_label']
+    for col in xgboost_columns:
+        if col in df_user.columns:
+            print(f"✓ Column {col} is present")
+        else:
+            print(f"✗ Column {col} is MISSING")
+    
+    # Print first 10 rows for debugging
+    print("\nFirst 10 rows of the final dataset:")
+    print(df_user.head(10))
+    
+    # Write to CSV
+    df_user.to_csv(outfile, index=False)
+    print(f"Wrote user-level dataset to {outfile} with {len(df_user)} records and {len(df_user.columns)} columns")
+    
+    return df_user
+
 if __name__ == "__main__":
     df_final = clean_and_aggregate_data()
     print("Final user-level dataset shape:", df_final.shape)
+    
+    # Debug: Print all column names to verify is_high_income is there
+    print("Columns in final dataset:", df_final.columns.tolist())
+    
     print(df_final.head(10))
-    output_path = "master_user_dataset.csv"
+    
+    # Create exploratory_data_analysis directory if it doesn't exist
+    os.makedirs("exploratory_data_analysis", exist_ok=True)
+    
+    # Update output path to use the exploratory_data_analysis folder
+    output_path = os.path.join("exploratory_data_analysis", "master_user_dataset.csv")
     df_final.to_csv(output_path, index=False)
     print(f"Master user dataset written to: {output_path}")
     

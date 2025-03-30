@@ -1,494 +1,192 @@
-# Synchrony Credit Line Increase Project: Data Processing Framework
-
-## Data Cleaning and Merging Logic
-
-The project builds a comprehensive credit line increase recommendation system using data from multiple sources. Here's how the data is processed:
-
-### Key Files and Their Main Fields
-
-#### 1. Account Dimension (`account_dim_20250325.csv`)
-- `current_account_nbr`: Primary account identifier used across datasets
-- `open_date`: Account opening date, used for calculating account age
-- `card_activation_date`: Used to calculate activation delay (time between opening and activation)
-- `closed_date`: Used to determine if account is still active
-- `is_high_income`: Derived from `employee_code` field (H=1, Y or NaN=0)
-- `payment_hist_1_12_mths`/`payment_hist_13_24_mths`: Payment history strings parsed into:
-  - `delinquency_count`: Number of delinquent months
-  - `max_delinquency`: Severity of worst delinquency
-  - `zero_balance_months`: Months with zero balance
-  - `credit_balance_months`: Months with credit balance
-  - `normal_months`: Months with normal payment status
-
-#### 2. User Mapping (`syf_id_20250325.csv`)
-- `account_nbr_pty` → `current_account_nbr`: Account identifier
-- `ds_id` → `user_id`: User identifier (one user can have multiple accounts)
-
-#### 3. Transaction Data
-Combined from two sources:
-- Regular transactions (`transaction_fact_20250325.csv`)
-- World store transactions (`wrld_stor_tran_fact_20250325.csv`)
-
-Key fields:
-- `current_account_nbr`: Account identifier
-- `transaction_date`: Date of transaction (used for time-based aggregation)
-- `transaction_amt`: Transaction amount
-- `transaction_type`: Used to identify purchases ("SALE") vs returns ("RETURN")
-
-Time-based transaction aggregations:
-- Annual: `total_spend_2024`, `total_transactions_2024`
-- Quarterly: `spend_2024_q1/q2/q3/q4`, `transactions_2024_q1/q2/q3/q4`
-- YTD 2025: `total_spend_2025YTD`, `total_transactions_2025YTD`
-
-#### 4. Fraud Data
-From two sources:
-- Case data (`fraud_claim_case_20250325.csv`)
-- Transaction data (`fraud_claim_tran_20250325.csv`)
-
-Key fields:
-- `current_account_nbr`: Account identifier
-- `has_fraud`: Binary flag (1=fraud account, 0=no fraud)
-- `transaction_am` → Aggregated into:
-  - `fraud_transaction_count`: Count of fraudulent transactions
-  - `fraud_transaction_sum`: Total fraudulent amount
-  - `fraud_transaction_avg`: Average fraudulent transaction
-  - `fraud_transaction_max`/`min`: Maximum/minimum fraudulent amounts
-  - `fraud_case_count`: Unique fraud cases per account
-
-#### 5. Risk Assessment (`rams_batch_cur_20250325.csv`)
-- `cu_account_nbr` → `current_account_nbr`: Account identifier
-- `cu_crd_line` → `credit_line`: Credit limit (scaled to thousands for modeling)
-- `cu_cur_balance` → `current_balance`: Current balance (scaled to thousands)
-- `cu_bhv_scr` → `behavior_score`: Internal behavior score
-- `cu_crd_bureau_scr` → `credit_score`: External credit bureau score
-
-### Derived Features
-- `account_age_days`: Days since account opening
-- `activation_delay_days`: Days between account opening and card activation
-- `avg_transaction_size_2024`: Average transaction amount in 2024
-- `utilization_pct`: Current balance as percentage of credit line
-- `avg_monthly_spend_2024`: Total 2024 spend divided by 12
-
-### Aggregation Logic
-Data is aggregated from account level to user level using specific functions:
-- Sum for transaction metrics and amounts
-- Min for score metrics
-- Max for risk indicators and flags
-- Mean for derived metrics like account age
-- Counts for active accounts
-
-### Feature Transformation
-- Financial amounts (`credit_line`, `current_balance`) scaled to thousands
-- Missing values imputed with:
-  - Zeros for count fields
-  - Medians for other numeric fields
-- Infinity values replaced with NaN
-- Payment history strings parsed into structured metrics
-
-This detailed data processing pipeline creates a comprehensive user-level dataset that captures spending patterns, risk factors, account performance, and financial metrics - all essential for the credit line increase recommendation system.
-
-## XGBoost Models
-
-### Model 1: Q4 Spend Prediction
-
-Model 1 is designed to predict customer spending for Q4 2024, which is critical for determining appropriate credit line increases. The model uses XGBoost regression to forecast spending based on historical patterns, customer behavior, and macroeconomic factors.
-
-#### Validation Approach
-Before building the main Q4 prediction model, a validation model is built to predict Q3 spend using only Q1 and Q2 data. This allows for validation against actual historical data rather than synthetic targets.
-
-#### Macroeconomic Feature Engineering
-The model incorporates sophisticated macroeconomic and seasonal features:
-
-1. **Holiday Spending Multiplier**
-   - Different customer segments have different holiday spending patterns
-   - Four segments based on credit score and utilization
-   - Multipliers range from 1.15 (subprime) to 1.45 (prime)
-   - High-income customers receive an additional 15% boost
-
-2. **Economic Outlook Factor**
-   - Based on economic projections for 2025
-   - Incorporates income growth rate (3.2%)
-   - Adjusted for inflation rate (2.8%)
-   - Consumer confidence index (0.65 on 0-1 scale)
-
-3. **Retail Sales Seasonal Index**
-   - Industry-specific Q4 seasonal patterns
-   - Electronics: 65% higher sales in Q4
-   - General retail: 45% higher sales in Q4
-   - Online shopping: 55% higher sales in Q4
-   - Grocery: 20% higher sales in Q4
-
-4. **Income-Based Spending Elasticity**
-   - Credit score used as proxy for income stability
-   - Higher scores = lower elasticity (less sensitive to economic changes)
-   - Normalized to 0-1 scale
-
-5. **Composite Q4 Adjustment Factor**
-   - Combines the above factors into a single multiplier
-   - Formula: (Holiday Multiplier × (1 + Economic Factor) × Seasonal Index) ÷ Spending Elasticity
-
-#### Advanced Feature Interactions
-The model creates economically meaningful feature interactions:
-
-1. **Credit Capacity**
-   - Credit line × (100 - utilization percentage) / 100
-   - Represents available spending power
-
-2. **Spending Momentum**
-   - Quarterly growth rates (Q1→Q2, Q2→Q3)
-   - Weighted trend (70% weight to recent quarter)
-   - Exponentially weighted prior spend
-
-3. **Economic Response**
-   - Economic factor × (credit score / 700)
-   - Captures how different credit profiles respond to economic conditions
-
-4. **Seasonal Spending Power**
-   - Holiday multiplier × average monthly spend
-   - Predicts holiday spending capability
-
-5. **Polynomial Features**
-   - Squared terms for key predictors
-   - Captures non-linear relationships
-   - Used for spend, monthly average, and credit line
-
-6. **High Income Interactions**
-   - Special interactions for high-income customers
-   - High income × credit capacity
-   - High income × spend profile
-   - High income × seasonal effect
-
-7. **Ratio Features**
-   - Balance to limit ratio
-   - Monthly spend growth (2025 vs 2024)
-
-#### Model Configuration
-The XGBoost model uses a carefully tuned configuration:
-- Objective: Squared error regression
-- Trees: 200 estimators
-- Max depth: 6 (to capture complex interactions)
-- Learning rate: 0.05 (slower learning for better generalization)
-- Regularization: Alpha=0.1, Lambda=1.0
-- Early stopping: 20 rounds of no improvement
-- Cross-validation: 20% validation split
-
-#### Post-Processing
-The model applies a post-processing adjustment:
-- Initial predictions are blended with the Q4 adjustment factor
-- 80% weight to model prediction, 20% to adjustment factor
-- This fine-tunes predictions with domain knowledge
-
-#### Model Performance
-- Test RMSE: ~$6,830
-- R² Score: 0.969
-- The model achieves strong predictive performance with high explanatory power
-
-#### Key Predictors
-Top features by importance:
-1. Average monthly spend (and its squared term)
-2. Total 2024 spend
-3. Credit line
-4. Holiday spending power
-5. Credit score
-6. Utilization percentage
-
-This model provides a robust foundation for predicting customer Q4 spending, which is then used by downstream models to determine appropriate credit line increases and risk assessments.
-
-### Model 2: Account Segmentation
-
-Model 2 classifies accounts into four distinct segments to determine their eligibility for credit line increases based on risk level and credit utilization patterns. This multi-class classification model is essential for targeting the right accounts for CLI offers.
-
-#### Segmentation Categories
-The model segments accounts into four categories:
-1. **Segment 0: Eligible for CLI - No Risk**
-   - Moderate utilization (30-70%)
-   - Good credit score (≥670)
-   - No high-risk flags
-
-2. **Segment 1: Eligible for CLI - At Risk**
-   - High utilization (>70%) or
-   - Lower credit score (<670)
-   - No critical risk factors
-
-3. **Segment 2: No Increase Needed**
-   - Low utilization (≤30%)
-   - Credit line already sufficient for spending patterns
-
-4. **Segment 3: High Risk (Non-Performing)**
-   - Accounts with delinquency
-   - Fraud history
-   - Other high-risk factors identified by Model 3
-
-#### Feature Selection
-The model uses a comprehensive set of risk and behavior indicators:
-- Credit profile: `credit_score`, `utilization_pct`
-- Risk history: `delinquency_12mo`, `delinquency_24mo`, `has_fraud`
-- Payment patterns: `payment_hist_1_12_delinquency_count`, `payment_hist_13_24_delinquency_count`
-- Spending behavior: `total_spend_2024`, `total_spend_2025YTD`, `avg_transaction_size_2024`
-- Financial metrics: `credit_line`, `current_balance`
-- Customer profile: `num_accounts`, `is_high_income`
-
-#### Model Configuration
-The XGBoost classifier is configured for multi-class classification:
-- Objective: Multi-class softmax probability
-- Number of classes: 4
-- Evaluation metric: Multi-class log loss
-- Trees: 100 estimators
-- Max depth: 4 (prevents overfitting on this complex classification)
-- Learning rate: 0.1
-- Sampling: 80% of data, 80% of features per tree
-- Early stopping: 10 rounds
-
-#### Cross-Validation Approach
-- Uses stratified sampling to maintain class distribution
-- 90% of training data used for model building
-- 10% reserved for validation and early stopping
-- 20% of total data held out for testing
-
-#### Model Output
-In addition to the segment classification, the model produces probability scores for each segment:
-- `segment_0_prob`: Probability of being eligible with no risk
-- `segment_1_prob`: Probability of being eligible with some risk
-- `segment_2_prob`: Probability of not needing an increase
-- `segment_3_prob`: Probability of being high risk
-
-These probability scores provide a confidence level for each classification and can be used for borderline cases.
-
-#### Performance Metrics
-- Test Accuracy: ~94.5%
-- Detailed performance metrics by segment:
-  - Precision: How many accounts classified into a segment truly belong there
-  - Recall: How many accounts truly belonging to a segment were correctly classified
-  - F1-Score: Harmonic mean of precision and recall
-
-#### Key Predictors
-The top features driving the segmentation:
-1. Credit utilization percentage
-2. Credit score
-3. Delinquency counts
-4. Current balance to credit line ratio
-5. Spending patterns
-
-#### Business Impact
-This segmentation model drives critical business decisions:
-- Determines which accounts are eligible for credit line increases
-- Helps prioritize accounts for different marketing treatments
-- Supports risk management by identifying high-risk accounts
-- Informs optimization of credit line increases to maximize acceptance rates
-
-The segmentation results are used as inputs for Model 4 (CLI Recommendation), which determines the optimal increase amount for eligible accounts.
-
-### Model 3: Risk Flagging
-
-Model 3 is a binary classification model that identifies accounts with elevated risk of delinquency, default, or fraud. This critical risk assessment component ensures that credit line increases are only offered to accounts with acceptable risk profiles.
-
-#### Target Variable Definition
-The risk flag (`risk_flag`) is created based on multiple criteria:
-
-1. **Primary Risk Criteria** (strict thresholds)
-   - Multiple delinquencies in the past 12 months (>3 instances)
-   - Multiple delinquencies in the past 13-24 months (>3 instances)
-   - Any fraud history (`has_fraud` = 1)
-
-2. **Secondary Risk Criteria** (applied if primary flags <5% of accounts)
-   - Extremely high utilization (>95%) AND
-   - Very low credit score (<600)
-
-3. **Distribution Balancing**
-   - Ensures a balanced dataset for model training (approximately 8% risk flagged)
-   - Uses random assignment if needed to reach target distribution
-   - Maintains statistical power for minority class detection
-
-#### Feature Selection
-The model uses a comprehensive set of risk indicators:
-- Credit quality: `credit_score`
-- Delinquency history: `delinquency_12mo`, `delinquency_24mo`, `has_fraud`
-- Payment severity: `payment_hist_1_12_max_delinquency`, `payment_hist_13_24_max_delinquency`
-- Account characteristics: `account_age_days`, `num_accounts`, `active_account_count`
-- Financial status: `utilization_pct`, `credit_line`, `current_balance`
-- Spending patterns: `total_spend_2024`, `total_spend_2025YTD`, `avg_monthly_spend_2024`
-- Customer profile: `is_high_income`
-
-#### Class Imbalance Handling
-The model incorporates specialized techniques to address the class imbalance inherent in risk modeling:
-- Calculation of `scale_pos_weight` based on class distribution
-- Weighted learning that gives more importance to minority class examples
-- Stratified sampling for train/test splits to maintain class distributions
-- Evaluation metrics suitable for imbalanced classification
-
-#### Model Configuration
-The XGBoost classifier is optimized for binary classification with imbalanced data:
-- Objective: Binary logistic regression
-- Evaluation metric: Area Under the ROC Curve (AUC)
-- Trees: 100 estimators
-- Max depth: 3 (shallower to prevent overfitting to majority class)
-- Learning rate: 0.1
-- Sampling: 80% of data, 80% of features per tree
-- Early stopping: 10 rounds
-- Scale positive weight: Calculated from class distribution
-
-#### Cross-Validation Approach
-- Stratified train/test split (80/20) to preserve class distribution
-- Further stratified validation split (10% of training data)
-- Early stopping based on AUC to optimize for ranking performance
-
-#### Model Output
-The model produces two key outputs:
-1. `risk_flag`: Binary prediction (0=not risky, 1=risky)
-2. `risk_probability`: Probability of being risky (0-1 range)
-
-The probability score is particularly valuable as an input to the CLI recommendation model, allowing for risk-adjusted CLI amounts.
-
-#### Performance Metrics
-- Test Accuracy: ~91%
-- ROC AUC: ~0.65-0.75
-- Precision/Recall metrics for both classes:
-  - Precision (Risky): How many flagged accounts are truly risky
-  - Recall (Risky): How many truly risky accounts were successfully identified
-
-#### Key Predictors
-The top features driving risk identification:
-1. Delinquency history (recent and historical)
-2. Credit score
-3. Utilization percentage
-4. Payment history delinquency counts
-5. Account age
-
-#### Business Impact
-This risk flagging model has significant business implications:
-- Protects the financial institution from extending credit to high-risk accounts
-- Reduces potential credit losses and fraud exposure
-- Improves the targeting efficiency of CLI programs
-- Provides risk probabilities that can be used to fine-tune CLI amounts
-- Serves as a critical input to the account segmentation model
-
-The model's risk probabilities are used both for determining segment assignments and for calibrating appropriate CLI amounts in Model 4.
-
-### Model 4: CLI Recommendation
-
-Model 4 is a regression model that recommends optimized credit line increase (CLI) amounts for eligible accounts. This model takes into account spending patterns, risk profiles, and business constraints to generate appropriate CLI recommendations.
-
-#### Eligibility Criteria
-Only accounts in segments 0 and 1 (as classified by Model 2) are eligible for CLI recommendations:
-- **Segment 0:** Eligible - No Risk accounts
-- **Segment 1:** Eligible - At Risk accounts
-
-The model excludes accounts in segments 2 (No Increase Needed) and 3 (High Risk).
-
-#### Feature Selection
-The model uses a comprehensive set of predictors:
-- **Spending patterns:** `predicted_q4_spend`, `avg_monthly_spend_2024`, `total_spend_2024`
-- **Risk metrics:** `risk_probability` (from Model 3), `credit_score`
-- **Account characteristics:** `credit_line`, `current_balance`, `utilization_pct`
-- **Customer profile:** `is_high_income`, `num_accounts`
-- **Seasonal factors:** `holiday_spending_multiplier`, `q4_adjustment_factor`
-
-#### Advanced Feature Engineering
-The model creates specialized CLI prediction features:
-1. **Spending-to-limit ratio:** Indicates if customers are constrained by current limits
-2. **Available credit metrics:** Current headroom and available credit ratio
-3. **Credit score tiers:** Categorical bins for credit scores (Poor, Fair, Good, Very Good, Excellent)
-4. **Risk-adjusted CLI potential:** Higher potential increases for lower-risk customers
-5. **Segment-specific spending capacity:** Different handling for Segment 0 vs. Segment 1
-6. **High-income specific features:** Special treatment for high-income customers with good credit
-7. **Compound CLI recommendation score:** Initial recommendation based on spending, credit quality, utilization, and risk
-
-#### Model Configuration
-The XGBoost regressor is optimized for CLI amount prediction:
-- Objective: Squared error regression
-- Trees: 150 estimators
-- Max depth: 5
-- Learning rate: 0.05
-- Regularization: Alpha=0.1, Lambda=1.0
-- Early stopping: 15 rounds
-
-#### Business Rules and Constraints
-The model applies several business rules as post-processing:
-1. **Minimum CLI amount:** $500 for eligible accounts
-2. **Maximum CLI caps by segment:**
-   - Segment 0 (No Risk): Up to 100% of current credit line
-   - Segment 1 (At Risk): Up to 50% of current credit line
-3. **High-income adjustments:**
-   - High-income accounts in Segment 0 can receive up to 150% of current limit
-   - High-income accounts in Segment 1 can receive up to 75% of current limit
-4. **Round recommendations:** CLI amounts rounded to nearest $100
-
-#### Performance Metrics
-- Test RMSE: ~$6,240
-- Mean CLI amount: ~$14,510
-- RMSE as percentage of mean: ~43%
-
-#### Key Predictors
-The top features driving CLI recommendations:
-1. Predicted Q4 spend
-2. Current credit line
-3. Compound CLI recommendation score
-4. Credit score
-5. Utilization percentage
-6. Risk probability
-7. Holiday spending multiplier
-
-#### Business Impact
-The CLI Recommendation model has significant business implications:
-- Optimizes credit line increases to match customer spending patterns
-- Balances growth opportunities against risk exposure
-- Provides personalized CLI amounts rather than generic increases
-- Adapts recommendations based on risk profiles and customer segments
-- Incorporates business rules and constraints to ensure practical recommendations
-
-The final recommendations are incorporated into the enriched dataset along with predictions from all previous models, creating a comprehensive view for decision-making.
-
-## Model Output Workflow
-
-The entire XGBoost modeling pipeline is designed to enrich a master dataset with predictions that support credit line increase decisions. The workflow follows a sequential process where each model builds upon the outputs of previous models.
-
-### Master Dataset Enrichment
-Each model adds new columns to the master dataset:
-1. **Model 1 (Q4 Spend Prediction)** adds:
-   - `predicted_q4_spend`: Forecasted spending for Q4 2025
-
-2. **Model 2 (Account Segmentation)** adds:
-   - `segment_label`: Classification into segments 0-3
-   - `segment_0_prob` through `segment_3_prob`: Probability scores for each segment
-
-3. **Model 3 (Risk Flagging)** adds:
-   - `risk_flag`: Binary risk classification (0=not risky, 1=risky)
-   - `risk_probability`: Probability of being classified as risky
-
-4. **Model 4 (CLI Recommendation)** adds:
-   - `recommended_cli_amount`: Dollar amount recommended for credit line increase
-
-### Visualization Outputs
-The modeling process generates several visualizations saved to the `visualizations` directory:
-
-1. **Segment Distribution**: Pie chart showing the proportion of accounts in each segment
-2. **Risk Distribution**: Histogram of risk probabilities across all accounts
-3. **Q4 Spend Prediction**: Scatter plot comparing predicted vs. actual Q4 spending
-4. **CLI by Segment**: Box plot showing CLI recommendation distributions by segment
-5. **Credit Score vs. CLI**: Scatter plot visualizing the relationship between credit scores and recommended CLI amounts
-
-### Model and Data Persistence
-The following artifacts are saved at the end of the modeling process:
-
-1. **Enriched Dataset**: 
-   - Saved to: `exploratory_data_analysis/master_user_dataset_with_predictions.csv`
-   - Contains all original features plus model predictions
-
-2. **Trained Models**:
-   - XGBoost model objects saved to the `models` directory:
-     - `q4_spend_prediction_model.joblib`
-     - `account_segmentation_model.joblib`
-     - `risk_flagging_model.joblib`
-     - `cli_recommendation_model.joblib`
-
-3. **Final Metrics Summary**:
-   - Overall performance metrics for each model are displayed after completion
-   - Statistics on accounts processed, risk classifications, and CLI recommendations
-
-### Using the Enriched Dataset
-The final master dataset with predictions provides a comprehensive decision-support tool that can be used to:
-
-1. **Identify Growth Opportunities**: Target accounts with high predicted Q4 spend in segments 0 and 1
-2. **Manage Risk**: Exclude high-risk accounts (segment 3) from CLI offers
-3. **Optimize CLI Amounts**: Use the recommended amounts for personalized CLI offers
-4. **Segment Marketing**: Tailor marketing messages based on segment classification
-5. **Monitor Performance**: Compare actual outcomes to predicted metrics for model refinement
+# Q4 Spend Prediction & CLI Optimization Project
+
+## 1. Project Overview
+
+This project addresses four key objectives for a financial institution:
+
+1. Q4 Spending Prediction:  
+   • Build a regression model that forecasts each customer's Q4 spend based on historical data (past Q4 trends, yearly spending) and the current year's last 8 months of data.
+
+2. Customer Segmentation:  
+   • Classify accounts into four segments:  
+     0. Eligible for CLI (No Risk)  
+     1. Eligible for CLI (At Risk)  
+     2. No CLI Increase Needed  
+     3. Non-Performing / High-Risk  
+
+3. Risk Detection:  
+   • Identify high-risk accounts (fraud, delinquencies, default risk).
+
+4. Credit Line Increase (CLI) Recommendation:  
+   • Suggest a personalized CLI amount per customer, balancing growth opportunities with potential default or fraud risk.
+
+These objectives aim to boost revenue from increased credit lines while minimizing risk from high-risk accounts.
+
+---
+
+## 2. Repository Structure
+
+Below is a sample structure of the repository and relevant files:
+├── data/ # Raw CSV data files
+├── cleaned_data/ # Cleaned/processed data files
+├── exploratory_data_analysis/ # Intermediate or final datasets, metrics, logs
+├── models/ # Model artifacts (joblib or pickle files)
+├── master.py # Script to clean & aggregate data into a user-level dataset
+├── xgboost_models.py # Contains XGBoost model definitions
+├── run_xgboost_pipeline.py # Main script to run the entire modeling pipeline
+├── README.md # Project instructions (this file)
+└── presentation_slides.pdf # (Optional) Presentation slides
+```
+---
+
+## 3. Setup Instructions
+
+1. **Clone or Download the Repository**  
+   • Use Git or directly download the ZIP from your repository or team folder.
+
+2. **Create & Activate a Python Environment (Python 3.8+ recommended)**  
+   Example with Conda:
+   ```
+   conda create -n credit_ml python=3.9
+   conda activate credit_ml
+   ```
+   Or use virtualenv, venv, etc.
+
+3. **Install Required Packages**  
+   If you have a requirements.txt file, run:
+   ```
+   pip install -r requirements.txt
+   ```
+   Common packages needed include:
+   - pandas  
+   - numpy  
+   - scikit-learn  
+   - xgboost  
+   - joblib  
+   - warnings (built into Python, but typically suppressed in the scripts)
+
+4. **Place Data Files**  
+   Ensure CSV files are placed in the correct directories:
+   - data/ (account_dim_20250325.csv, transaction_fact_20250325.csv, world transaction data, etc.)
+   - cleaned_data/ (if you have pre-cleaned or interim CSV files)
+
+5. **(Optional) Adjust File Paths**  
+   • If your data is in a different location, update paths in `master.py` or other scripts accordingly.
+
+---
+
+## 4. How to Run
+
+1. **Data Cleaning & Aggregation**  
+   • Run `master.py`:
+     ```
+     python master.py
+     ```
+   • This merges and cleans raw data, producing a single user-level dataset.  
+   • By default, it writes out a file like `exploratory_data_analysis/master_user_dataset.csv`.
+
+2. **Modeling Pipeline**  
+   • Execute `run_xgboost_pipeline.py`:  
+     ```
+     python run_xgboost_pipeline.py
+     ```
+   • This script attempts to load the master dataset and then:  
+     1. Initializes the data with required columns (correcting any missing fields for the models)  
+     2. Runs Model 1: Q4 Spend Prediction  
+     3. Runs Model 2: Customer Segmentation  
+     4. Runs Model 3: Risk Flagging  
+     5. Runs Model 4: CLI Recommendation  
+   • Final output includes:  
+     - A new CSV in `exploratory_data_analysis/`, e.g. `master_user_dataset_with_predictions.csv`, with predictions and recommended CLI amounts.  
+     - Saved model artifacts (if no errors occur) in `models/`.
+
+3. **Review Results**  
+   - Check console logs for performance metrics (RMSE, accuracy, etc.).  
+   - Explore the final CSV to see each user's predicted Q4 spend, assigned segment, risk flag, and CLI recommendation.
+
+---
+
+## 5. Features & Approach
+
+1. **Feature Engineering**  
+   • Aggregated spend for Q1, Q2, Q3, plus YTD totals  
+   • Holiday multiplier for seasonal Q4 spike  
+   • Fraud/delinquency flags from 12-24 months of history  
+   • Credit line & current balance → utilization %  
+   • Payment history columns to identify risk patterns
+
+2. **Models**  
+   A. **Model 1: Q4 Spend Prediction (Regression)**  
+      - Predicts each user's Q4 spend.  
+      - Key features: Past Q4 patterns, total 2024 spend, monthly average, holiday multiplier.
+
+   B. **Model 2: Customer Segmentation (Multi-class Classification)**  
+      - Segments: Eligible-No Risk (0), Eligible-At Risk (1), No Increase Needed (2), High-Risk (3).  
+      - Key features: credit_score, utilization_pct, delinquency counts, fraud flags.
+
+   C. **Model 3: Risk Flagging (Binary Classification)**  
+      - Outputs a probability or a hard flag (0 or 1) indicating risk of default/fraud.  
+      - Focuses on recall for the "risky" class, preventing missed high-risk accounts.
+
+   D. **Model 4: CLI Recommendation (Regression)**  
+      - Suggests a credit line increase amount.  
+      - Inputs: credit_line, segment_label, risk_probability, is_high_income, Q4 spend potential.
+
+---
+
+## 6. Known Limitations & Future Enhancements
+
+1. **Macro-economic data** (unemployment, inflation, consumer sentiment) could refine spending models.  
+2. **Real-time streaming** might catch new fraud patterns more effectively.  
+3. Additional **A/B testing** of CLI offers can tune acceptance rates and reduce default risk.
+
+---
+
+## 7. Example Results
+
+• **Q4 Spend Model**:  
+  - Achieves an R² close to 0.98 on training data (example figure).  
+  - RMSE indicates robust predictive capability, with strong holiday season correlation.
+
+• **Segmentation**:  
+  - Overall multi-class accuracy ~94%.  
+  - Segment 0 & 1 help identify CLI eligibility, while Segment 2 & 3 focus on restricting unnecessary or high-risk CLI.
+
+• **Risk Model**:  
+  - ~84% accuracy with emphasis on recall for risky customers.  
+  - High utilization and delinquency are leading risk indicators.
+
+• **CLI Model**:  
+  - Recommends carefully calibrated increases for eligible accounts.  
+  - Higher CLI for high-income + good credit. Minimal or no CLI if at risk.
+
+---
+
+## 8. Reproduce & Contribute
+
+1. **Fork This Repository** or **Download** it.  
+2. **Set Up** your Python environment & data paths.  
+3. **Run** the cleaning script (`master.py`) and pipeline (`run_xgboost_pipeline.py`).  
+4. **Inspect** the output CSV for final predictions and recommended CLI.  
+5. **Pull Requests** are welcome to enhance feature engineering or improve the models.
+
+---
+
+## 9. Presentation Video
+
+• We have prepared a short (< 7-minute) explanation video:  
+  - [Unlisted YouTube Link Here] (Replace with final link)  
+
+In the video, we briefly walk through the business problem, data sources, featured models, and final insights. 
+
+---
+
+## 10. Submission Guidelines & Acknowledgments
+
+• **Submission**: Zip all relevant code (including this README) and upload to your project folder / repository.  
+• **Team**: [Alt F4: Luke, Hazel, Ben ].  
+• **Thanks** to everyone who contributed to data generation and the domain SMEs who provided key insights.
+
+---
+
+**End of README**

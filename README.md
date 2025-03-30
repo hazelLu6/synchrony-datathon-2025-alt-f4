@@ -174,7 +174,7 @@ Below is a sample structure of the repository and relevant files:
 ## 9. Presentation Video
 
 • We have prepared a short (< 7-minute) explanation video:  
-  - [Unlisted YouTube Link Here] (Replace with final link)  
+  - Unlisted YouTube Link: https://www.youtube.com/watch?v=cqlTwzMULTs 
   - Google slide used: https://docs.google.com/presentation/d/17cAbNUgTXFelDzF7bCX9abowQR43-TFINMWHQ6a9k3o/edit?usp=sharing 
   - More detailed logic explained: https://docs.google.com/document/d/1ey--S7cJ6MRezBTEsJAv4heOeALNIw5qncH-Mpc-t-E/edit?usp=sharing
 
